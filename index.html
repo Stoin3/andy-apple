@@ -148,7 +148,8 @@
   <div class="panel help">
     <h2 style="text-align:center">❓ Hoe speel je?</h2>
     <ul>
-      <li>Houd <kbd>SPATIE</kbd>, de muis of het scherm <b>ingedrukt</b> om aan een liaan te blijven hangen.</li>
+      <li>Je start op een rots: houd <kbd>SPATIE</kbd>, de muis of het scherm <b>ingedrukt</b> om naar de eerste liaan te springen.</li>
+      <li>Blijf ingedrukt houden om aan een liaan te hangen. Grijp je hem te hoog, dan glijdt Andy vanzelf een stukje omlaag en houdt hij zijn vaart.</li>
       <li><b>Laat los</b> om weg te springen – laat los als Andy naar voren zwaait! <b>WOOHOO!</b></li>
       <li>Houd in de lucht ingedrukt om te <b>duiken</b>: eerst rustig, daarna steeds sneller. Raak je een liaan terwijl je ingedrukt houdt, dan grijp je hem vast.</li>
       <li>Paddenstoelen laten je hoog stuiteren. Alleen <b>naar beneden vallen</b> is game over.</li>
@@ -257,14 +258,19 @@ const PX_PER_M = 30;          // pixels per meter
 const STEP = 1 / 120;         // vaste physics-stap (echte tijd)
 const GAME_SPEED = 1.2;       // alles loopt iets sneller dan echte tijd: meer tempo
 const DT = STEP * GAME_SPEED; // gesimuleerde tijd per physics-stap
-const GRAVITY = 1500;
+const GRAVITY = 1500;         // zwaartekracht voor lianen en het zwaaien
+const AIR_G = 1000;           // lagere zwaartekracht in de lucht: Andy zweeft langer
+const MAX_FALL = 1050;        // maximale valsnelheid zonder te duiken
 const SEG_LEN = 16;           // lengte van één liaan-segment
 const ARM_LEN = 34;           // afstand hand -> lichaam van de gorilla
 const G_R = 22;               // straal van de gorilla
 const G_DRAW = 1.3;           // tekenschaal van de gorilla
 const ROPE_ITERS = 12;
-const START_X = 320;
-const WALL_X = 150;
+const START_X = 320;          // 0 m
+const ROCK = { x0: 40, x1: 300, top: 430 }; // startrots
+const FEET = 28;              // afstand van Andy's midden tot zijn voeten
+const FIRST_VINE = { x: 580, ay: 30, len: 320 };
+const WALL_X = 50;
 const SHROOM_TOP = HAZARD_Y - 64;
 const CEIL_Y = -1150;         // hoogste ophangpunt van lianen: daarboven is alleen nog lucht
 const ANCHOR_LOW = 230;       // laagste ophangpunt van lianen
@@ -318,6 +324,8 @@ const magnetR    = l => l ? 50 + 35 * l : 0;
 const appleVal   = l => 1 + 0.5 * l;
 const goldChance = l => 0.03 + 0.025 * l;
 const rocketDist = l => 150 * l;
+const parrotCd   = l => 2.4 - 0.45 * l;
+const comboWin   = l => 0.8 + 0.3 * l;
 // Hoeveel appels één geplukte appel oplevert. De biomebonus telt op bij de Appeloogst-upgrade
 // (niet vermenigvuldigen), zodat late biomes lonend zijn zonder dat upgrades uit balans raken.
 const applesPerPick = bi => appleVal(lvl('value')) + BIOMES[bi].bonus;
@@ -333,6 +341,12 @@ const UPGRADES = [
   { id:'balloon', icon:'🎈', name:'Reddingsballon', info:'Redt je als je naar beneden valt.',                     max:3, base:80,  growth:2.2,  fx:l => `${l}× per run` },
   { id:'helmet',  icon:'⛑️', name:'Helm',           info:'Voorkomt dat een vijand appels van je steelt.',         max:3, base:70,  growth:2.2,  fx:l => `${l}× per run` },
   { id:'rocket',  icon:'🚀', name:'Raketstart',     info:'Begin elke run met een raketvlucht.',                   max:4, base:120, growth:2.0,  fx:l => l ? `${rocketDist(l)} m` : 'geen' },
+  { id:'glide',   icon:'🍃', name:'Bladzweef',      info:'Andy houdt een groot blad vast en valt langzamer als je niet duikt.', max:4, base:45, growth:1.9, fx:l => l ? `-${l * 10}% vallen` : 'geen' },
+  { id:'parrot',  icon:'🦜', name:'Papegaaimaatje', info:'Een papegaai vliegt met je mee en plukt appels voor je.',  max:4, base:90,  growth:2.0,  fx:l => l ? `elke ${fmtNum(parrotCd(l))} s een appel` : 'geen' },
+  { id:'rain',    icon:'🌧️', name:'Appelregen',     info:'Bij elke 100 m regent het appels uit de lucht.',        max:3, base:60,  growth:2.0,  fx:l => l ? `${3 + l * 3} appels per 100 m` : 'geen' },
+  { id:'combo',   icon:'🔥', name:'Comboketting',   info:'Je combo blijft langer staan en levert meer bonus op.',  max:3, base:55,  growth:2.0,  fx:l => `${fmtNum(comboWin(l))} s · bonus ×${1 + l}` },
+  { id:'vinewise',icon:'🌿', name:'Liaankenner',    info:'Rotte lianen houden langer, ijs is minder glad en er zijn meer turbolianen.', max:3, base:50, growth:2.0, fx:l => l ? `+${l * 40}% grip` : 'geen' },
+  { id:'shroom',  icon:'🍄', name:'Stuiterzwam',    info:'Meer paddenstoelen, en ze lanceren je hoger en verder.',  max:3, base:40,  growth:1.9,  fx:l => l ? `+${l * 40}% paddenstoelen` : 'geen' },
 ];
 const upCost = (u, l) => Math.round(u.base * Math.pow(u.growth, l) / 5) * 5;
 
@@ -480,7 +494,7 @@ const Sfx = {
     src.connect(flt).connect(g).connect(this.ac.destination); src.start(t, Math.random() * 0.5); src.stop(t + d + 0.02);
   },
   // appel: de toonhoogte klimt mee met de combo
-  apple(gold, combo) {
+  apple(gold, combo = 1) {
     const steps = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24, 26, 28, 31];
     const f = 740 * Math.pow(2, steps[Math.min(combo - 1, steps.length - 1)] / 12);
     if (gold) { [1, 1.25, 1.5, 2].forEach((m, i) => this.tone(f * m, 0.12, 'square', 0.045, 0, i * 0.05)); }
@@ -518,44 +532,61 @@ const Sfx = {
     for (let i = 0; i < 11; i += 2) this.noise(0.05, i % 4 ? 0.05 : 0.1, i % 4 ? 5000 : 1200, i * b);
     this.tone(n(24 + third), 0.5, 'sine', 0.05, 0, t - b);
   },
-  // "WOOHOO!": een zaagtand-stem door formantfilters van de klinker "oe", met toonhoogtecurve en vibrato
+  // "Hoe-hoe-WOE-HOEEE!": een apenroep. Een stembron met natuurlijke boventonen, adem, toonhoogte-jitter
+  // en een ruw randje gaat door klinkerfilters (formanten); de lettergrepen stijgen zoals bij een echte aap.
   woohoo() {
     if (!save.sound || !this.ac) return;
-    const ac = this.ac, t0 = ac.currentTime + 0.01, k = 0.92 + Math.random() * 0.18;
-    const out = ac.createGain(); out.gain.value = 0.38; out.connect(ac.destination);
+    const ac = this.ac, t0 = ac.currentTime + 0.01, k = 0.93 + Math.random() * 0.15, end = t0 + 1.1;
+    if (!this.glottal) {
+      const n = 32, re = new Float32Array(n), im = new Float32Array(n);
+      for (let h = 1; h < n; h++) im[h] = Math.pow(h, -1.35) * (h % 2 ? 1 : 0.75);
+      this.glottal = ac.createPeriodicWave(re, im);
+    }
+    const out = ac.createGain(); out.gain.value = 0.12; out.connect(ac.destination);
     const bus = ac.createGain();
-    const formants = [[330, 1.0, 5], [800, 0.6, 7], [2300, 0.18, 9]].map(([f, g, q]) => {
-      const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = f; bp.Q.value = q;
-      const gg = ac.createGain(); gg.gain.value = g * 2.2;
+    const F = [[1.0, 7], [0.6, 9], [0.22, 11]].map(([g, q]) => {
+      const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = q;
+      const gg = ac.createGain(); gg.gain.value = g * 2.6;
       bus.connect(bp).connect(gg).connect(out);
-      return bp;
+      return bp.frequency;
     });
-    const f2 = formants[1].frequency;
-    f2.setValueAtTime(520, t0); f2.linearRampToValueAtTime(800, t0 + 0.12);
-    const osc = ac.createOscillator(); osc.type = 'sawtooth';
-    const env = ac.createGain(); env.gain.value = 0;
-    osc.connect(env).connect(bus);
-    const f = osc.frequency;
-    f.setValueAtTime(240 * k, t0);
-    f.linearRampToValueAtTime(340 * k, t0 + 0.18);
-    f.linearRampToValueAtTime(330 * k, t0 + 0.24);
-    f.linearRampToValueAtTime(470 * k, t0 + 0.34);
-    f.linearRampToValueAtTime(500 * k, t0 + 0.46);
-    f.exponentialRampToValueAtTime(300 * k, t0 + 0.85);
-    const lfo = ac.createOscillator(); lfo.frequency.value = 6.5;
-    const lg = ac.createGain(); lg.gain.value = 12 * k;
-    lfo.connect(lg).connect(f);
-    const g = env.gain;
-    g.setValueAtTime(0, t0);
-    g.linearRampToValueAtTime(0.55, t0 + 0.07);
-    g.setValueAtTime(0.55, t0 + 0.17);
-    g.linearRampToValueAtTime(0.04, t0 + 0.24);
-    g.linearRampToValueAtTime(0.9, t0 + 0.31);
-    g.setValueAtTime(0.9, t0 + 0.55);
-    g.exponentialRampToValueAtTime(0.001, t0 + 0.88);
-    osc.start(t0); lfo.start(t0); osc.stop(t0 + 0.92); lfo.stop(t0 + 0.92);
-    this.noise(0.08, 0.12, 1800, 0.22);
+    const osc = ac.createOscillator(); osc.setPeriodicWave(this.glottal);
+    const voice = ac.createGain(); voice.gain.value = 0;
+    const rough = ac.createGain(); rough.gain.value = 0.8;
+    osc.connect(voice).connect(rough).connect(bus);
+    const am = ac.createOscillator(); am.frequency.value = 42; const amG = ac.createGain(); amG.gain.value = 0.22; am.connect(amG).connect(rough.gain);
+    // toonhoogte-jitter en vibrato (via detune)
+    const jit = ac.createBufferSource(); jit.buffer = this.noiseBuf; jit.loop = true;
+    const jlp = ac.createBiquadFilter(); jlp.type = 'lowpass'; jlp.frequency.value = 18;
+    const jg = ac.createGain(); jg.gain.value = 1500; jit.connect(jlp).connect(jg).connect(osc.detune);
+    const vib = ac.createOscillator(); vib.frequency.value = 7; const vg = ac.createGain(); vg.gain.setValueAtTime(0, t0); vg.gain.linearRampToValueAtTime(35, t0 + 0.9); vib.connect(vg).connect(osc.detune);
+    // adem door dezelfde klinkerfilters
+    const nz = ac.createBufferSource(); nz.buffer = this.noiseBuf; nz.loop = true;
+    const breath = ac.createGain(); breath.gain.value = 0; nz.connect(breath).connect(bus);
+    const f = osc.frequency, v = voice.gain, br = breath.gain;
+    const syl = [ // start, duur, toon-van, toon-naar, luidheid, klinker
+      [0.00, 0.10, 330, 400, 0.4, 'u'],
+      [0.13, 0.10, 390, 470, 0.5, 'u'],
+      [0.27, 0.17, 400, 590, 0.75, 'w'],
+      [0.47, 0.55, 680, 420, 1.0, 'o'],
+    ];
+    v.setValueAtTime(0, t0); br.setValueAtTime(0, t0); f.setValueAtTime(syl[0][2] * k, t0);
+    for (const [st, d, fa, fb, amp, vow] of syl) {
+      const a = t0 + st, e = a + d;
+      f.setValueAtTime(fa * k * 0.9, a); f.linearRampToValueAtTime(fa * k, a + 0.03);
+      if (d > 0.3) { f.linearRampToValueAtTime(fa * k * 1.07, a + d * 0.22); f.exponentialRampToValueAtTime(fb * k, e); }
+      else f.linearRampToValueAtTime(fb * k, e);
+      v.setValueAtTime(0.0001, a); v.linearRampToValueAtTime(amp, a + 0.025);
+      v.setValueAtTime(amp * 0.9, e - Math.min(0.1, d * 0.4)); v.linearRampToValueAtTime(0.0001, e);
+      br.setValueAtTime(0.0001, a); br.linearRampToValueAtTime(amp * 0.55, a + 0.012); br.linearRampToValueAtTime(amp * 0.14, a + 0.06); br.linearRampToValueAtTime(0.0001, e);
+      // de eerste formant volgt de toonhoogte, zodat ook de hoge uithaal vol klinkt
+      F[0].setValueAtTime(Math.max(vow === 'w' ? 260 : 310, fa * k * 0.95), a); F[1].setValueAtTime(vow === 'w' ? 560 : vow === 'o' ? 1100 : 780, a); F[2].setValueAtTime(2400, a);
+      F[0].linearRampToValueAtTime(Math.max(vow === 'o' ? 440 : 340, fb * k * 0.95), e); F[1].linearRampToValueAtTime(vow === 'o' ? 920 : 860, e);
+    }
+    for (const node of [osc, am, jit, vib, nz]) { node.start(t0); node.stop(end); }
   },
+  jump() { this.tone(220, 0.15, 'triangle', 0.14, 440); this.noise(0.1, 0.08, 1500); },
+  slide() { this.tone(900, 0.12, 'sine', 0.05, 500); this.noise(0.1, 0.05, 4000); },
 };
 
 // =====================================================================
@@ -666,16 +697,44 @@ const Music = {
 //  Canvas & schaal
 // =====================================================================
 const canvas = $('game');
-let ctx = canvas.getContext('2d');
-let dpr = 1, cssW = 0, cssH = 0, scale = 1, viewW = 0, viewH = 0;
+let ctx = canvas.getContext('2d', { alpha: false });
+const mainCtx = ctx;
+// Kwaliteitsniveaus: het spel meet zelf de framerate en schakelt terug als het te traag gaat.
+// px = maximaal aantal pixels voor het beeld, bg = resolutie van de (vage) achtergrond
+const QUALITY = [
+  { px: 0.42e6, bg: 0.45, bgEvery: 2, rays: false, clouds: false, parts: 220, amb: 25 },
+  { px: 0.75e6, bg: 0.5,  bgEvery: 2, rays: false, clouds: true,  parts: 400, amb: 45 },
+  { px: 1.25e6, bg: 0.55, bgEvery: 1, rays: true,  clouds: true,  parts: 650, amb: 70 },
+  { px: 2.1e6,  bg: 0.6,  bgEvery: 1, rays: true,  clouds: true,  parts: 900, amb: 70 },
+];
+const QKEY = 'andyApples.quality';
+let qLevel = 2, qMax = 3;
+try { const q = JSON.parse(localStorage.getItem(QKEY)); if (q && q.l >= 0 && q.l <= 3) { qLevel = q.l; qMax = Math.max(q.l, q.m ?? 3); } } catch (e) { /* geen voorkeur */ }
+let Q = QUALITY[qLevel];
+let dpr = 1, pr = 1, cssW = 0, cssH = 0, scale = 1, viewW = 0, viewH = 0;
+let bgFrame = 0, bgStale = true;
+const bgCanvas = document.createElement('canvas');
+const bgCtx = bgCanvas.getContext('2d', { alpha: false });
 function resize() {
   dpr = Math.min(2, window.devicePixelRatio || 1);
   cssW = window.innerWidth; cssH = window.innerHeight;
-  canvas.width = Math.round(cssW * dpr); canvas.height = Math.round(cssH * dpr);
+  Q = QUALITY[qLevel];
+  pr = Math.min(dpr, Math.sqrt(Q.px / (cssW * cssH)));
+  canvas.width = Math.round(cssW * pr); canvas.height = Math.round(cssH * pr);
   canvas.style.width = cssW + 'px'; canvas.style.height = cssH + 'px';
   scale = Math.min(cssH / 740, cssW / 500);
   viewW = cssW / scale; viewH = cssH / scale;
+  bgCanvas.width = Math.max(2, Math.round(cssW * pr * Q.bg)); bgCanvas.height = Math.max(2, Math.round(cssH * pr * Q.bg));
+  gradCache.clear();
+  bgStale = true;
 }
+function setQuality(l) {
+  qLevel = clamp(l, 0, 3);
+  try { localStorage.setItem(QKEY, JSON.stringify({ l: qLevel, m: qMax })); } catch (e) { /* negeren */ }
+  resize();
+}
+const gradCache = new Map();
+function cachedGrad(key, make) { let g = gradCache.get(key); if (!g) { g = make(); gradCache.set(key, g); if (gradCache.size > 300) gradCache.clear(); } return g; }
 window.addEventListener('resize', resize);
 resize();
 // bovenkant van het beeld in rust; op hoge (staande) schermen gaat een deel van de extra ruimte naar het water
@@ -691,7 +750,7 @@ let camX = 0, camY = 0, lastCamX = 0, shakeT = 0, shakeAmp = 0, flashT = 0;
 let time = 0;
 let G = null;
 const game = { mode: 'menu', paused: false, holdLock: false };
-const input = { down: false };
+const input = { down: false, presses: 0 };
 
 const VINE_LOOK = {
   rotten:  { col: '#7b5b36', leaf: '#9a7a4a' },
@@ -700,9 +759,13 @@ const VINE_LOOK = {
   elastic: { col: '#e0559f', leaf: '#ff9ed2' },
   balloon: { col: '#b98d55', leaf: '#e8d3a8' },
 };
+function restSeg(x, ay, len, type) {
+  const L = len * (type === 'elastic' ? 1.2 : 1);
+  return [x, ay, x - Math.sin(VINE_SLANT) * L, ay + Math.cos(VINE_SLANT) * L];
+}
 function makeVine(x, ay, len, type, bi) {
   const n = Math.max(6, Math.round(len / SEG_LEN));
-  const off = -VINE_SLANT + rand(-0.08, 0.08); // schuin naar linksonder, zoals in Benji Bananas
+  const off = -VINE_SLANT; // schuin naar linksonder, zoals in Benji Bananas
   const pts = [];
   for (let i = 0; i <= n; i++) {
     const px = x + Math.sin(off) * i * SEG_LEN, py = ay + Math.cos(off) * i * SEG_LEN;
@@ -711,7 +774,8 @@ function makeVine(x, ay, len, type, bi) {
   const look = VINE_LOOK[type] || { col: BIOMES[bi].c.vine, leaf: BIOMES[bi].c.leaf };
   const flowers = ['#ff7eb6', '#7ec8ff', '#ffd23f', '#ffffff'];
   return { x, ay, pts, type, bi, col: look.col, dark: shade(look.col, -0.38), light: shade(look.col, 0.3), leaf: look.leaf,
-    phase: Math.random() * 6.28, anchored: true, snapAt: type === 'rotten' ? rand(0.8, 1.2) : 0,
+    phase: Math.random() * 6.28, anchored: true, snapAt: type === 'rotten' ? rand(0.8, 1.2) * (1 + 0.4 * lvl('vinewise')) : 0,
+    rest: restSeg(x, ay, n * SEG_LEN, type),
     // tak waaraan de liaan hangt
     bl: rand(30, 46), tilt: rand(-0.12, 0.12),
     flower: Math.random() < 0.45 ? flowers[(Math.random() * flowers.length) | 0] : null };
@@ -720,17 +784,19 @@ function makeVine(x, ay, len, type, bi) {
 function resetWorld() {
   vines = []; apples = []; shrooms = []; foes = []; parts = []; texts = []; fishes = [];
   time = 0;
-  const v0 = makeVine(START_X, 40, 300, 'normal', 0);
+  // Andy staat op de startrots; de eerste liaan hangt binnen springbereik
+  const v0 = makeVine(FIRST_VINE.x, FIRST_VINE.ay, FIRST_VINE.len, 'normal', 0);
   vines.push(v0);
-  const k = v0.pts.length - 1, q = v0.pts[k];
-  G = { x: q.x, y: q.y + ARM_LEN, px: q.x - 5, py: q.y + ARM_LEN, vx: 0, vy: 0, im: 0.012,
-    state: 'hang', vine: v0, k, armLen: ARM_LEN, hangT: 0, slideT: 0, angle: 0, diveT: 0, dive: 0,
+  const sx = 250, sy = ROCK.top - FEET;
+  G = { x: sx, y: sy, px: sx, py: sy, vx: 0, vy: 0, im: 0.012,
+    state: 'stand', vine: null, k: 0, slideTo: 0, slideT: 0, armLen: ARM_LEN, hangT: 0, iceT: 0, angle: 0, diveT: 0, dive: 0, noDive: false,
     lastVine: null, releaseT: 0, invuln: 0, balloonT: 0, turboT: 0, deadT: 0, spin: 0, splashed: false, diving: false,
-    airT: 0, airX: 0, helmets: lvl('helmet'), balloons: lvl('balloon'), rocketEnd: 0 };
-  gen = { x: START_X, special: 0, col: 0, low: 40 + 300, tips: [40 + 300 * TIP_F] };
+    airT: 0, airX: 0, standPress: -1, helmets: lvl('helmet'), balloons: lvl('balloon'), rocketEnd: 0,
+    parrot: lvl('parrot') ? { x: sx - 40, y: sy - 60, cd: 1, target: null, t: 0 } : null };
+  gen = { x: FIRST_VINE.x, special: 0, col: 0, low: FIRST_VINE.ay + FIRST_VINE.len, tips: [FIRST_VINE.ay + FIRST_VINE.len * TIP_F] };
   run = { picked: 0, earned: 0, stolen: 0, golden: 0, dist: 0, biome: 0, reason: '', lastWoo: 0,
     combo: 0, lastPick: -9, firstJump: true, nextMile: 100 };
-  camX = G.x - viewW * 0.32; camY = baseTop(); lastCamX = camX;
+  camX = Math.max(-100, G.x - viewW * 0.32); camY = baseTop(); lastCamX = camX;
   genUntil(camX + viewW + 900);
   game.holdLock = false;
   Music.biome = 0;
@@ -751,7 +817,7 @@ function fitVine(ay, len, stretch) {
 }
 function pickType(F, d) {
   const hazardous = { rotten: F.rotten * (1 + 0.3 * d), icy: F.icy * (1 + 0.3 * d) };
-  const opts = [['rotten', hazardous.rotten], ['icy', hazardous.icy], ['turbo', F.turbo], ['elastic', F.elastic], ['fruit', F.fruit]];
+  const opts = [['rotten', hazardous.rotten], ['icy', hazardous.icy], ['turbo', F.turbo * (1 + 0.35 * lvl('vinewise'))], ['elastic', F.elastic], ['fruit', F.fruit]];
   let r = Math.random(), type = 'normal';
   for (const [t, p] of opts) { if (r < p) { type = t; break; } r -= p; }
   // nooit drie lastige lianen achter elkaar
@@ -759,9 +825,37 @@ function pickType(F, d) {
   gen.special = (type === 'rotten' || type === 'icy') ? gen.special + 1 : 0;
   return type;
 }
-function addVine(x, ay, len, type, bi) {
+// kortste afstand tussen twee lijnstukken
+function segDist(a, b) {
+  const d = (px, py, x1, y1, x2, y2) => { const dx = x2 - x1, dy = y2 - y1, l2 = dx * dx + dy * dy || 1; const t = clamp(((px - x1) * dx + (py - y1) * dy) / l2, 0, 1); return Math.hypot(px - x1 - t * dx, py - y1 - t * dy); };
+  const cr = (ax, ay, bx, by, cx, cy) => (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  const [x1, y1, x2, y2] = a, [x3, y3, x4, y4] = b;
+  if (cr(x1, y1, x2, y2, x3, y3) * cr(x1, y1, x2, y2, x4, y4) < 0 && cr(x3, y3, x4, y4, x1, y1) * cr(x3, y3, x4, y4, x2, y2) < 0) return 0;
+  return Math.min(d(x1, y1, x3, y3, x4, y4), d(x2, y2, x3, y3, x4, y4), d(x3, y3, x1, y1, x2, y2), d(x4, y4, x1, y1, x2, y2));
+}
+// Lianen mogen nooit in of te dicht tegen elkaar spawnen
+function vineFits(x, ay, len, type) {
+  const seg = restSeg(x, ay, Math.max(6, Math.round(len / SEG_LEN)) * SEG_LEN, type);
+  for (const v of vines) {
+    if (Math.abs(v.x - x) > 700) continue;
+    if (segDist(seg, v.rest) < 75 || Math.hypot(v.x - x, v.ay - ay) < 130) return false;
+  }
+  return true;
+}
+function addVine(x, ay, len, type, bi, force) {
   [ay, len] = fitVine(ay, len, type === 'elastic' ? ELASTIC_STRETCH : 1);
+  // probeer een paar kleine verschuivingen/inkortingen als hij te dicht bij een andere liaan hangt
+  const tries = [[0, 0, 1], [0, -70, 1], [0, 70, 1], [50, 0, 1], [-50, 0, 0.8], [0, 0, 0.65], [90, -40, 0.75], [90, 60, 0.7]];
+  if (force) for (const dx of [-60, -20, 30, 80, 130, 180]) for (const dy of [-150, -60, 30, 110]) tries.push([dx, dy, 0.85]);
+  let ok = false;
+  for (const [dx, dy, lf] of tries) {
+    const ty = clamp(ay + dy, CEIL_Y, ANCHOR_LOW), tl = Math.max(150, len * lf);
+    const [fy, fl] = fitVine(ty, tl, type === 'elastic' ? ELASTIC_STRETCH : 1);
+    if (vineFits(x + dx, fy, fl, type)) { x += dx; ay = fy; len = fl; ok = true; break; }
+  }
+  if (!ok && !force) return null;
   const v = makeVine(x, ay, len, type, bi);
+  if (!ok) v.forced = 1;
   vines.push(v);
   if (type === 'fruit') {
     const n = v.pts.length, gc = goldChance(lvl('golden'));
@@ -778,24 +872,23 @@ function genNext() {
   const bi = biomeIndexAt(m), F = features(bi);
   let gap = rand(230, 300) + d * rand(40, 150);
   let shroom = false;
-  if (m > 20 && Math.random() < 0.13 * (1 - 0.6 * dc)) { shroom = true; gap += rand(120, 200); }
+  if (m > 20 && Math.random() < 0.13 * (1 - 0.6 * dc) * (1 + 0.4 * lvl('shroom'))) { shroom = true; gap += rand(120, 200); }
   const x = gen.x + gap;
   const vbi = biomeIndexAt((x - START_X) / PX_PER_M);
   gen.col++;
 
   const col = [];
+  const tip = v => v.ay + v.pts.length * SEG_LEN * TIP_F;
+  // Haalbaarheid: vanaf de laagste liaan van de vorige kolom kun je hooguit ~170 px hoger komen,
+  // dus eerst komt er een liaan waarvan het uiteinde zeker laag genoeg hangt; de rest wijkt daarvoor uit.
+  const gLen = rand(290, 350), gAy = clamp(gen.low - 110 - gLen * TIP_F + rand(-70, 20), CEIL_Y, ANCHOR_LOW);
+  col.push(addVine(x + rand(-30, 30), gAy, gLen, m < 8 ? 'normal' : pickType(F, d), vbi, true));
   const skip = m < 12 ? 0 : 0.12 + 0.3 * dc; // hoe verder, hoe meer gaten
   for (let ay = CEIL_Y + (gen.col % 2 ? ROW / 2 : 0) + rand(0, 60); ay <= ANCHOR_LOW; ay += ROW + rand(-50, 50)) {
     if (Math.random() < skip) continue;
     const type = m < 8 ? 'normal' : pickType(F, d);
-    col.push(addVine(x + rand(-50, 50), ay + rand(-40, 40), rand(230 - 60 * dc, 410), type, vbi));
-  }
-  // Haalbaarheid: vanaf de laagste liaan van de vorige kolom kun je hooguit ~170 px hoger komen,
-  // dus er moet altijd een liaan zijn waarvan het uiteinde laag genoeg hangt.
-  const tip = v => v.ay + v.pts.length * SEG_LEN * TIP_F;
-  if (!col.some(v => tip(v) >= gen.low - 170)) {
-    const len = 320, ay = clamp(gen.low - 110 - len * TIP_F, CEIL_Y, ANCHOR_LOW);
-    col.push(addVine(x + rand(-30, 30), ay, len, 'normal', vbi));
+    const v = addVine(x + rand(-50, 50), ay + rand(-40, 40), rand(230 - 60 * dc, 410), type, vbi);
+    if (v) col.push(v);
   }
   let low = -Infinity;
   for (const v of col) low = Math.max(low, v.ay + v.pts.length * SEG_LEN * (v.type === 'elastic' ? 1.2 : 1));
@@ -803,7 +896,7 @@ function genNext() {
   // Heel af en toe: een luchtballon boven het plafond met een liaan eronder
   if (m > 40 && Math.random() < 0.05 && !vines.some(v => v.balloon && v.x > x - 1500)) {
     const bv = addVine(x + rand(0, 100), CEIL_Y - 190, 300, 'balloon', vbi);
-    bv.balloon = { vx: rand(60, 90), hue: (Math.random() * 360) | 0, bob: rand(0, 6) };
+    if (bv) bv.balloon = { vx: rand(60, 90), hue: (Math.random() * 360) | 0, bob: rand(0, 6) };
   }
 
   const x0 = gen.x, x1 = x - 200 * Math.sin(VINE_SLANT);
@@ -867,17 +960,20 @@ function simVine(v, dt) {
     a.y = v.ay + Math.sin(time * 0.9 + b.bob) * 12;
     a.px = a.x; a.py = a.y;
   }
-  const wind = (Math.sin(time * 0.7 + v.phase) * 0.6 + Math.sin(time * 1.9 + v.phase * 2) * 0.4) * 60 + VINE_TILT;
+  // de scheefhang-kracht werkt niet op de liaan waar Andy aan hangt: die zou zijn zwaai afremmen
+  const wind = (Math.sin(time * 0.7 + v.phase) * 0.6 + Math.sin(time * 1.9 + v.phase * 2) * 0.4) * 60 + (hang ? 0 : VINE_TILT);
+  const damp = hang ? 0.9995 : 0.996;
   for (let i = 0; i < n; i++) {
     const q = p[i]; if (q.im === 0) continue;
-    const vx = (q.x - q.px) * 0.996, vy = (q.y - q.py) * 0.996;
+    const vx = (q.x - q.px) * damp, vy = (q.y - q.py) * damp;
     q.px = q.x; q.py = q.y;
     q.x += vx + wind * dt2; q.y += vy + GRAVITY * dt2;
   }
   if (hang) integrateHanging(v, dt);
   const k = G.k, elastic = v.type === 'elastic';
   const stiff = elastic ? 0.2 : 1, reach = elastic ? ELASTIC_STRETCH : 1;
-  for (let it = 0; it < ROPE_ITERS; it++) {
+  const iters = hang ? ROPE_ITERS : 6;
+  for (let it = 0; it < iters; it++) {
     for (let i = 0; i < n - 1; i++) solve(p[i], p[i + 1], SEG_LEN, stiff);
     if (hang) solve(p[k], G, G.armLen, 1);
     if (v.anchored) {
@@ -913,8 +1009,8 @@ function integrateHanging(v, dt) {
     }
   }
   G.px = G.x; G.py = G.y;
-  G.x += vx * 0.9995 + ax * dt * dt;
-  G.y += vy * 0.9995 + ay * dt * dt;
+  G.x += vx * 0.9999 + ax * dt * dt;
+  G.y += vy * 0.9999 + ay * dt * dt;
 }
 
 function tryGrab() {
@@ -933,11 +1029,21 @@ function tryGrab() {
 }
 function attach(v, k) {
   const airT = G.airT, dx = G.x - G.airX;
-  G.state = 'hang'; G.vine = v; G.k = k; G.hangT = 0; G.slideT = 0; G.im = 0.012; G.diveT = 0; G.dive = 0;
+  const p = v.pts, n = p.length;
+  G.state = 'hang'; G.vine = v; G.k = k; G.hangT = 0; G.iceT = 0; G.im = 0.012; G.diveT = 0; G.dive = 0; G.noDive = false;
+  // Nooit helemaal bovenin: Andy glijdt een stukje omlaag (anders is al zijn vaart weg)
+  G.slideTo = Math.max(k, Math.max(6, Math.round(n * 0.45))); G.slideT = 0;
+  if (G.slideTo > k && game.mode === 'playing') Sfx.slide();
+  // Momentum behouden: de vaart wordt omgezet in de zwaairichting in plaats van weggegooid
+  const a = p[0], rx = G.x - a.x, ry = G.y - a.y, rl = Math.hypot(rx, ry) || 1;
+  const tx = -ry / rl, ty = rx / rl, speed = Math.hypot(G.vx, G.vy), vt = G.vx * tx + G.vy * ty;
+  let dir = Math.sign(vt) || 1;
+  if (Math.abs(vt) < speed * 0.35 && tx * dir < 0) dir = -dir; // twijfel: kies de richting die vooruit gaat
+  const keep = speed * 0.96;
+  G.vx = tx * dir * keep; G.vy = ty * dir * keep;
   G.px = G.x - G.vx * DT; G.py = G.y - G.vy * DT;
-  G.armLen = Math.max(12, Math.hypot(v.pts[k].x - G.x, v.pts[k].y - G.y));
-  const p = v.pts;
-  for (let j = Math.max(1, k - 3); j <= Math.min(p.length - 1, k + 3); j++) {
+  G.armLen = Math.max(12, Math.hypot(p[k].x - G.x, p[k].y - G.y));
+  for (let j = Math.max(1, k - 3); j <= Math.min(n - 1, k + 3); j++) {
     p[j].px = p[j].x - G.vx * DT * 0.6; p[j].py = p[j].y - G.vy * DT * 0.6;
   }
   Sfx.grab();
@@ -977,7 +1083,7 @@ function release(voluntary = true) {
   // de allereerste sprong krijgt extra kracht, zodat je meteen vaart hebt
   if (playing && voluntary && run.firstJump) {
     run.firstJump = false;
-    vx = Math.max(vx, 0) * 1.2 + 460; vy = Math.min(vy, 0) - 420;
+    vx = Math.max(vx, 0) * 1.15 + 300; vy = Math.min(vy, 0) - 250;
     floatText(G.x, G.y - 60, 'Daar gaat ie!', '#ffffff', 26);
     starBurst(G.x, G.y, 18, '#ffe46b');
     shake(4, 0.2);
@@ -990,6 +1096,13 @@ function release(voluntary = true) {
     // WOOHOO! bij een flinke zwaai (niet vaker dan eens per 0,7 s)
     if (voluntary && Math.hypot(vx, vy) > 380 && time - run.lastWoo > 0.7) { run.lastWoo = time; Sfx.woohoo(); }
   }
+}
+// Sprong vanaf de startrots naar de eerste liaan
+function jump() {
+  G.state = 'air'; G.vx = 690; G.vy = -770; G.airT = 0; G.airX = G.x; G.noDive = true; G.lastVine = null;
+  floatText(G.x, G.y - 60, 'Hup!', '#ffffff', 26);
+  for (let i = 0; i < 10; i++) addPart({ x: G.x + rand(-14, 14), y: ROCK.top, vx: rand(-120, 60), vy: rand(-120, -20), life: 0.5, max: 0.5, col: 'rgba(210,190,160,.8)', r: rand(3, 6), g: 300 });
+  Sfx.jump();
 }
 function snapVine(v) {
   v.anchored = false; v.pts[0].im = 1;
@@ -1004,6 +1117,7 @@ function startRocket() {
   if (G.state === 'hang') { G.lastVine = G.vine; G.releaseT = 1; G.vine = null; }
   G.state = 'rocket';
   G.rocketEnd = START_X + rocketDist(lvl('rocket')) * PX_PER_M;
+  G.y = ROCK.top - FEET - 30;
   G.vx = 1500; G.vy = 0;
   floatText(G.x, G.y - 60, 'Raketstart! 🚀', '#ffe07a', 24);
   Sfx.rocket();
@@ -1011,7 +1125,7 @@ function startRocket() {
 function hitHazard() {
   if (G.balloons > 0) {
     G.balloons--;
-    G.y = HAZARD_Y - G_R; G.vy = -1700; G.vx = Math.max(G.vx, 420);
+    G.y = HAZARD_Y - G_R; G.vy = -1400; G.vx = Math.max(G.vx, 420);
     G.balloonT = 1.4; G.invuln = Math.max(G.invuln, 0.8);
     splash(G.x, 14);
     floatText(G.x, G.y - 70, 'Gered! 🎈', '#ffffff', 24);
@@ -1059,10 +1173,14 @@ function step(dt) {
   const holdHang = forced || (game.mode === 'playing' && input.down);
   const holdAir = game.mode === 'playing' && input.down;
 
-  const cx = camX + viewW / 2;
-  for (const v of vines) if (v === G.vine || Math.abs(v.x - cx) < viewW + 700) simVine(v, dt);
+  // alleen lianen in (de buurt van) beeld worden gesimuleerd
+  const x0 = camX - 500, x1 = camX + viewW + 500, y0 = camY - 450, y1 = camY + viewH + 450;
+  for (const v of vines) {
+    if (v === G.vine || (v.x > x0 && v.x < x1 && v.ay < y1 && v.rest[3] > y0 - 200)) simVine(v, dt);
+  }
 
   updateGorilla(dt, holdHang, holdAir);
+  updateParrot(dt);
   updateFoes(dt);
   updateApples(dt);
   for (const s of shrooms) s.sq *= Math.pow(0.02, dt);
@@ -1079,8 +1197,18 @@ function updateGorilla(dt, holdHang, holdAir) {
     const v = G.vine, p = v.pts;
     G.vx = (G.x - G.px) / dt; G.vy = (G.y - G.py) / dt;
     G.diving = false;
-    if (G.armLen > ARM_LEN) G.armLen = Math.max(ARM_LEN, G.armLen - 140 * dt);
-    else if (G.armLen < ARM_LEN) G.armLen = Math.min(ARM_LEN, G.armLen + 140 * dt);
+    // omlaag glijden na een grijp te hoog aan de liaan
+    if (G.k < G.slideTo) {
+      G.slideT += dt;
+      while (G.slideT > 0.016 && G.k < G.slideTo) {
+        G.slideT -= 0.016; G.k++;
+        G.armLen = Math.hypot(p[G.k].x - G.x, p[G.k].y - G.y);
+        if (Math.random() < 0.5) addPart({ type: 'leaf', x: p[G.k].x, y: p[G.k].y, vx: rand(-60, 60), vy: rand(-60, 10), life: 0.5, max: 0.5, col: v.leaf, r: 3, rot: rand(0, 6), vr: 6, g: 300 });
+      }
+    }
+    const shrink = G.k < G.slideTo ? 520 : 160;
+    if (G.armLen > ARM_LEN) G.armLen = Math.max(ARM_LEN, G.armLen - shrink * dt);
+    else if (G.armLen < ARM_LEN) G.armLen = Math.min(ARM_LEN, G.armLen + 160 * dt);
     const q = p[G.k];
     G.angle = Math.atan2(q.x - G.x, -(q.y - G.y));
     if (!holdHang) release();
@@ -1090,9 +1218,9 @@ function updateGorilla(dt, holdHang, holdAir) {
         if (G.hangT > v.snapAt) snapVine(v);
         else if (G.hangT > v.snapAt - 0.45 && Math.random() < 0.3) addPart({ x: p[1].x, y: p[1].y, vx: rand(-40, 40), vy: 0, life: 0.6, max: 0.6, col: '#7b5b36', r: 2.5 });
       } else if (v.type === 'icy') {
-        G.slideT += dt;
-        if (G.slideT > 0.26) {
-          G.slideT = 0;
+        G.iceT += dt;
+        if (G.iceT > 0.26 * (1 + 0.4 * lvl('vinewise'))) {
+          G.iceT = 0;
           if (G.k < p.length - 1) {
             G.k++; G.armLen = Math.hypot(p[G.k].x - G.x, p[G.k].y - G.y);
             addPart({ type: 'star', x: p[G.k].x, y: p[G.k].y, vx: rand(-60, 60), vy: rand(-60, 0), life: 0.4, max: 0.4, col: '#ffffff', r: 3, rot: 0, vr: 5 });
@@ -1105,19 +1233,36 @@ function updateGorilla(dt, holdHang, holdAir) {
         addPart({ type: 'star', x: G.x + rand(-10, 10), y: G.y + rand(-10, 10), vx: rand(-40, 40), vy: rand(-80, -20), life: 0.5, max: 0.5, col: '#ffd23f', r: 3, rot: 0, vr: 6, g: 0 });
       }
     }
+  } else if (G.state === 'stand') {
+    G.vx = 0; G.vy = 0; G.angle *= 0.85; G.diving = false;
+    // opnieuw springen vanaf de rots (met een nieuwe druk op de knop)
+    if (playing && input.down && input.presses !== G.standPress) jump();
   } else if (G.state === 'air') {
     G.airT += dt;
+    if (G.noDive && G.airT > 1.2) G.noDive = false;
     // duiken gaat geleidelijk: eerst rustig, daarna steeds sneller naarmate je langer ingedrukt houdt
-    G.diveT = holdAir ? G.diveT + dt : 0;
+    const diveHold = holdAir && !G.noDive;
+    G.diveT = diveHold ? G.diveT + dt : 0;
     const e = clamp((G.diveT - 0.04) / 0.5, 0, 1);
-    G.dive += (e * e - G.dive) * Math.min(1, dt * (holdAir ? 30 : 12));
+    G.dive += (e * e - G.dive) * Math.min(1, dt * (diveHold ? 30 : 12));
     G.diving = G.dive > 0.25;
-    G.vy += GRAVITY * (1 + 1.9 * G.dive) * dt;
-    G.vx -= G.vx * 0.05 * dt;
+    const glide = G.vy > 0 && G.dive < 0.1 ? 1 - 0.1 * lvl('glide') : 1;
+    G.vy += AIR_G * glide * (1 + 1.6 * G.dive) * dt;
+    const maxFall = MAX_FALL * glide * (1 + 0.8 * G.dive);
+    if (G.vy > maxFall) G.vy += (maxFall - G.vy) * Math.min(1, dt * 6);
+    G.vx -= G.vx * 0.04 * dt;
     const sp = Math.hypot(G.vx, G.vy), maxS = 1850;
     if (sp > maxS) { G.vx *= maxS / sp; G.vy *= maxS / sp; }
+    const prevFeet = G.y + FEET;
     G.x += G.vx * dt; G.y += G.vy * dt;
     if (G.x < WALL_X) { G.x = WALL_X; G.vx = Math.abs(G.vx) * 0.4; }
+    // de startrots is massief: erop landen of ertegen botsen
+    if (G.x > ROCK.x0 - 10 && G.x - G_R * 0.6 < ROCK.x1) {
+      if (G.vy > 0 && prevFeet <= ROCK.top + 4 && G.y + FEET >= ROCK.top) {
+        G.y = ROCK.top - FEET; G.state = 'stand'; G.vx = 0; G.vy = 0; G.standPress = input.presses;
+        addPart({ type: 'ring', x: G.x, y: ROCK.top, vx: 0, vy: 0, life: 0.35, max: 0.35, col: 'rgba(255,255,255,.7)', r: 8, grow: 30, g: 0, flat: true });
+      } else if (G.y + FEET > ROCK.top + 6) { G.x = ROCK.x1 + G_R * 0.6; G.vx = Math.abs(G.vx) * 0.3; }
+    }
     const target = clamp(G.vx * 0.0004 + G.dive * 0.6 + clamp(G.vy * 0.0003, -0.2, 0.3), -0.7, 1.1);
     G.angle += (target - G.angle) * Math.min(1, dt * 8);
     // snelheidsspoor
@@ -1127,7 +1272,8 @@ function updateGorilla(dt, holdHang, holdAir) {
     if (G.state === 'air') {
       for (const s of shrooms) {
         if (G.vy > 0 && Math.abs(G.x - s.x) < s.w / 2 + 8 && G.y + G_R > SHROOM_TOP && G.y < SHROOM_TOP + 16) {
-          G.y = SHROOM_TOP - G_R; G.vy = -rand(1500, 1620); G.vx = Math.max(G.vx, 380); s.sq = 1;
+          const sl = lvl('shroom');
+          G.y = SHROOM_TOP - G_R; G.vy = -rand(1250, 1350) * (1 + 0.07 * sl); G.vx = Math.max(G.vx, 380 + 70 * sl); s.sq = 1;
           floatText(s.x, SHROOM_TOP - 40, 'Boing!', '#ffffff', 24);
           starBurst(s.x, SHROOM_TOP, 10, BIOMES[s.bi].shroom);
           Sfx.boing(); shake(3, 0.15);
@@ -1144,12 +1290,12 @@ function updateGorilla(dt, holdHang, holdAir) {
     G.angle += (0 - G.angle) * Math.min(1, dt * 6);
     addPart({ x: G.x - 40, y: G.y + 22 + rand(-4, 4), vx: -rand(200, 500), vy: rand(-60, 60), life: 0.4, max: 0.4, col: Math.random() < 0.5 ? '#ffb020' : '#ff5a1f', r: rand(4, 8), g: 0 });
     if (G.x >= G.rocketEnd) {
-      G.state = 'air'; G.vx = 800; G.vy = -340; G.invuln = 0.8; G.airT = 0; G.airX = G.x;
+      G.state = 'air'; G.vx = 800; G.vy = -300; G.invuln = 0.8; G.airT = 0; G.airX = G.x;
       burst(G.x - 30, G.y + 20, 16, '#bbbbbb', 250, 5);
     }
   } else if (G.state === 'dead') {
     G.deadT += dt;
-    G.vy += GRAVITY * dt;
+    G.vy += AIR_G * dt;
     if (G.y > HAZARD_Y) { G.vy = Math.min(G.vy, 70); G.vx *= Math.pow(0.1, dt); }
     G.x += G.vx * dt; G.y += G.vy * dt; G.angle += G.spin * dt;
     if (G.deadT > 1.3 && game.mode === 'dying') gameOver();
@@ -1162,6 +1308,12 @@ function updateGorilla(dt, holdHang, holdAir) {
       confetti(G.x, G.y - 40, 30);
       Sfx.milestone();
       run.nextMile += 100;
+      const rain = lvl('rain');
+      if (rain) { // appelregen
+        const gc = goldChance(lvl('golden'));
+        for (let i = 0; i < 3 + rain * 3; i++) apples.push({ x: G.x + rand(80, 560), y: camY - rand(20, 260), vx: rand(-20, 20), vy: rand(40, 140), rain: true, gold: Math.random() < gc, t: 0 });
+        floatText(G.x + 200, G.y - 110, 'Appelregen! 🌧️', '#bfe6ff', 24);
+      }
     }
     const bi = biomeIndexAt(run.dist);
     if (bi > run.biome) {
@@ -1221,6 +1373,7 @@ function updateApples(dt) {
     a.t += dt;
     if (a.x < camX - 250) { apples.splice(i, 1); continue; }
     if (a.vine) { const q = a.vine.pts[a.idx]; a.x = q.x + 9; a.y = q.y + 4; }
+    if (a.rain) { a.vy = Math.min(a.vy + 220 * dt, 260); a.x += a.vx * dt; a.y += a.vy * dt; if (a.y > HAZARD_Y + 20) { apples.splice(i, 1); continue; } }
     if (a.loose) { // weggeslagen appels vallen naar beneden
       a.grace -= dt; a.vy += GRAVITY * 0.7 * dt; a.x += a.vx * dt; a.y += a.vy * dt;
       if (a.y > HAZARD_Y + 20) { apples.splice(i, 1); continue; }
@@ -1233,7 +1386,7 @@ function updateApples(dt) {
   }
 }
 function collect(a) {
-  run.combo = time - run.lastPick < 0.8 ? run.combo + 1 : 1;
+  run.combo = time - run.lastPick < comboWin(lvl('combo')) ? run.combo + 1 : 1;
   run.lastPick = time;
   let val;
   if (a.loose) val = 1; // teruggepakte appel
@@ -1249,7 +1402,7 @@ function collect(a) {
   floatText(a.x, a.y - 16, '+' + fmtNum(val), a.gold ? '#ffe46b' : '#ffffff', a.gold ? 22 : 18);
   Sfx.apple(a.gold, run.combo);
   if (run.combo >= 10 && run.combo % 10 === 0) {
-    const bonus = run.combo / 2;
+    const bonus = run.combo / 2 * (1 + lvl('combo'));
     run.earned += bonus;
     floatText(G.x, G.y - 70, `Combo ×${run.combo}! +${bonus}🍎`, '#ffe46b', 26);
     confetti(G.x, G.y - 30, 24);
@@ -1257,10 +1410,31 @@ function collect(a) {
   }
 }
 
+// Papegaaimaatje: vliegt mee en plukt af en toe een appel in de buurt
+function updateParrot(dt) {
+  const B = G.parrot;
+  if (!B) return;
+  B.t += dt; B.cd -= dt;
+  if (B.target && !apples.includes(B.target)) B.target = null;
+  if (!B.target && B.cd <= 0 && game.mode === 'playing' && G.state !== 'dead') {
+    let best = null, bd = 260;
+    for (const a of apples) { if (a.loose && a.grace > 0) continue; const d = Math.hypot(a.x - G.x, a.y - G.y); if (d < bd && a.x > G.x - 60) { bd = d; best = a; } }
+    B.target = best; if (!best) B.cd = 0.3;
+  }
+  if (B.target) {
+    const dx = B.target.x - B.x, dy = B.target.y - B.y, d = Math.hypot(dx, dy), s = 950 * dt;
+    if (d < 18) { const i = apples.indexOf(B.target); if (i >= 0) { apples.splice(i, 1); collect(B.target); } B.target = null; B.cd = parrotCd(lvl('parrot')); }
+    else { B.x += dx / d * Math.min(d, s); B.y += dy / d * Math.min(d, s); }
+  } else {
+    const k = Math.min(1, dt * 7);
+    B.x += (G.x - 38 - B.x) * k; B.y += (G.y - 62 + Math.sin(B.t * 3) * 6 - B.y) * k;
+  }
+}
+
 // =====================================================================
 //  Deeltjes & effecten
 // =====================================================================
-function addPart(p) { if (parts.length < 900) parts.push(p); }
+function addPart(p) { if (parts.length < Q.parts) parts.push(p); }
 function burst(x, y, n, col, spd, r) {
   for (let i = 0; i < n; i++) {
     const a = Math.random() * Math.PI * 2, s = spd * (0.3 + Math.random() * 0.7);
@@ -1318,7 +1492,7 @@ function updateEffects(dt) {
 }
 
 function updateCamera(dt) {
-  const tx = G.x - viewW * (G.state === 'rocket' ? 0.25 : 0.32);
+  const tx = Math.max(-100, G.x - viewW * (G.state === 'rocket' ? 0.25 : 0.32));
   camX += (tx - camX) * Math.min(1, dt * 4.5);
   // verticaal meebewegen (de wereld is veel hoger dan het scherm), maar nooit onder de bodem kijken
   const bt = baseTop();
@@ -1334,7 +1508,8 @@ function updateCamera(dt) {
 const amb = [];
 for (let i = 0; i < 70; i++) amb.push({ x: Math.random() * 2000, y: Math.random() * 1400, s: rand(0.5, 1.5), ph: Math.random() * 6.28 });
 function updateAmbient(dt, type, camDX, camDY) {
-  for (const p of amb) {
+  for (let i = 0; i < Q.amb; i++) {
+    const p = amb[i];
     let vx = 0, vy = 0;
     switch (type) {
       case 'leaf': vy = 25 + p.s * 25; vx = Math.sin(time * 1.3 + p.ph) * 30; break;
@@ -1445,7 +1620,7 @@ function crossfade(P, fn) {
 let PAD = 0;
 const layerCaches = {};
 function cachedLayer(name, f, fy, key, draw) {
-  const M = 280, res = Math.min(1.5, scale * dpr) * 0.7;
+  const M = 280, res = scale * pr * Q.bg;
   const offX = camX * f, offY = (camY - baseTop()) * fy, W = viewW + 2 * M, H = viewH + 2 * M;
   let L = layerCaches[name];
   if (!L || L.W !== W || L.H !== H || L.res !== res) {
@@ -1488,6 +1663,15 @@ function appleSprite(gold) {
   });
 }
 
+function glowSprite(col) {
+  return sprite('glow' + col, () => {
+    const [c, g] = makeCanvas(64, 64);
+    const gr = g.createRadialGradient(32, 32, 2, 32, 32, 32);
+    gr.addColorStop(0, `rgba(${col},.75)`); gr.addColorStop(1, `rgba(${col},0)`);
+    g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+    return { c, w: 64, h: 64 };
+  });
+}
 function cloudSprite(v) {
   return sprite('cloud' + v, () => {
     const W = 260, H = 120, [c, g] = makeCanvas(W, H), rnd = mulberry32(v * 31 + 5);
@@ -1630,9 +1814,12 @@ function mtnH(x, p, seed) {
   return n * p.amp;
 }
 function drawSky(P) {
-  const g = ctx.createLinearGradient(0, 0, 0, viewH);
-  g.addColorStop(0, P.skyTop); g.addColorStop(0.55, P.skyMid); g.addColorStop(1, P.skyBot);
-  ctx.fillStyle = g; ctx.fillRect(0, 0, viewW, viewH);
+  ctx.fillStyle = cachedGrad('sky' + paletteKey(P) + viewH, () => {
+    const g = ctx.createLinearGradient(0, 0, 0, viewH);
+    g.addColorStop(0, P.skyTop); g.addColorStop(0.55, P.skyMid); g.addColorStop(1, P.skyBot);
+    return g;
+  });
+  ctx.fillRect(0, 0, viewW, viewH);
   const nightW = styleWeight(P, 'night'), iceW = styleWeight(P, 'ice'), volcW = styleWeight(P, 'volcano');
   // sterren
   if (nightW > 0) {
@@ -1661,9 +1848,13 @@ function drawSky(P) {
   }
   // zon / maan
   const sx = viewW * 0.76, sy = layerY(150 + volcW * 120, 0.03), R = 48 - volcW * 6;
-  const glow = ctx.createRadialGradient(sx, sy, R * 0.5, sx, sy, R * 4);
-  glow.addColorStop(0, rgbStr(P.sunC, 0.55)); glow.addColorStop(0.35, rgbStr(P.sunC, 0.16)); glow.addColorStop(1, rgbStr(P.sunC, 0));
-  ctx.fillStyle = glow; circ(sx, sy, R * 4);
+  ctx.save(); ctx.translate(sx, sy);
+  ctx.fillStyle = cachedGrad('sunglow' + paletteKey(P), () => {
+    const glow = ctx.createRadialGradient(0, 0, R * 0.5, 0, 0, R * 4);
+    glow.addColorStop(0, rgbStr(P.sunC, 0.55)); glow.addColorStop(0.35, rgbStr(P.sunC, 0.16)); glow.addColorStop(1, rgbStr(P.sunC, 0));
+    return glow;
+  });
+  circ(0, 0, R * 4); ctx.restore();
   // zonnestralen (langzaam draaiend)
   const rayW = 1 - nightW;
   if (rayW > 0.05) {
@@ -1673,9 +1864,13 @@ function drawSky(P) {
     ctx.restore();
   }
   if (iceW > 0) { ctx.strokeStyle = `rgba(255,255,255,${0.35 * iceW})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(sx, sy, R * 2.6, 0, Math.PI * 2); ctx.stroke(); }
-  const disc = ctx.createRadialGradient(sx - R * 0.3, sy - R * 0.3, R * 0.1, sx, sy, R);
-  disc.addColorStop(0, '#ffffff'); disc.addColorStop(0.55, P.sun); disc.addColorStop(1, rgbStr(mixC(P.sunC, [255, 140, 40], 0.35 * (1 - nightW))));
-  ctx.fillStyle = disc; circ(sx, sy, R);
+  ctx.save(); ctx.translate(sx, sy);
+  ctx.fillStyle = cachedGrad('sundisc' + paletteKey(P), () => {
+    const disc = ctx.createRadialGradient(-R * 0.3, -R * 0.3, R * 0.1, 0, 0, R);
+    disc.addColorStop(0, '#ffffff'); disc.addColorStop(0.55, P.sun); disc.addColorStop(1, rgbStr(mixC(P.sunC, [255, 140, 40], 0.35 * (1 - nightW))));
+    return disc;
+  });
+  circ(0, 0, R); ctx.restore();
   if (nightW > 0) { // maankraters
     ctx.fillStyle = `rgba(150,150,130,${0.45 * nightW})`;
     circ(sx - 14, sy - 8, 9); circ(sx + 14, sy + 12, 7); circ(sx + 8, sy - 20, 4.5); circ(sx - 6, sy + 20, 5);
@@ -1760,6 +1955,7 @@ function drawVolcanoSmoke(P, L) {
 }
 // Wolken op verschillende hoogtes: je vliegt er langs als je klimt
 function drawAltClouds(P) {
+  if (!Q.clouds) return;
   const nightW = styleWeight(P, 'night'), volcW = styleWeight(P, 'volcano');
   const f = 0.15, fy = 0.5, sp = 380, off = camX * f;
   ctx.save(); ctx.globalAlpha = 0.8 - nightW * 0.55 - volcW * 0.3;
@@ -1900,9 +2096,14 @@ function drawGiantTrunks(P) {
       if (hash(i * 4.1) < 0.2) continue;
       const w = 60 + hash(i * 5.7) * 45, x = i * sp + hash(i * 2.3) * 400 - off;
       if (x + w < -60 || x - w > viewW + 60) continue;
-      const gr = ctx.createLinearGradient(x - w / 2, 0, x + w / 2, 0);
-      gr.addColorStop(0, rgbStr(barkD)); gr.addColorStop(0.35, rgbStr(bark)); gr.addColorStop(0.7, rgbStr(barkL)); gr.addColorStop(1, rgbStr(barkD));
-      ctx.fillStyle = gr; ctx.fillRect(x - w / 2, -10, w, viewH + 20);
+      const wq = Math.round(w / 5) * 5;
+      ctx.save(); ctx.translate(x, 0);
+      ctx.fillStyle = cachedGrad(`trunk${B.style}${paletteKey(P)}${wq}`, () => {
+        const gr = ctx.createLinearGradient(-wq / 2, 0, wq / 2, 0);
+        gr.addColorStop(0, rgbStr(barkD)); gr.addColorStop(0.35, rgbStr(bark)); gr.addColorStop(0.7, rgbStr(barkL)); gr.addColorStop(1, rgbStr(barkD));
+        return gr;
+      });
+      ctx.fillRect(-wq / 2, -10, wq, viewH + 20); ctx.restore();
       // wortels onderaan
       const gy = layerY(HAZARD_Y + 10, fy);
       if (gy < viewH + 40) { ctx.fillStyle = rgbStr(barkD); ctx.beginPath(); ctx.moveTo(x - w / 2, gy - 80); ctx.quadraticCurveTo(x - w / 2 - 10, gy - 10, x - w * 1.3, gy + 10); ctx.lineTo(x + w * 1.3, gy + 10); ctx.quadraticCurveTo(x + w / 2 + 10, gy - 10, x + w / 2, gy - 80); ctx.fill(); }
@@ -1935,6 +2136,7 @@ function drawGiantTrunks(P) {
   });
 }
 function drawLightRays(P) {
+  if (!Q.rays) return;
   const w = styleWeight(P, 'jungle') + styleWeight(P, 'swamp') * 0.7 + styleWeight(P, 'savanne') * 0.5;
   if (w <= 0.02) return;
   ctx.save();
@@ -1952,22 +2154,27 @@ function drawLightRays(P) {
 // =====================================================================
 //  Speelwereld
 // =====================================================================
-function drawStartTree() {
-  if (camX > 260) return;
-  const top = CEIL_Y - 900;
-  const gr = ctx.createLinearGradient(10, 0, 140, 0);
-  gr.addColorStop(0, '#3f2814'); gr.addColorStop(0.5, '#6f4726'); gr.addColorStop(1, '#4a2e16');
-  ctx.fillStyle = gr; ctx.fillRect(10, top, 130, HAZARD_Y + 120 - top);
-  ctx.strokeStyle = '#3a2410'; ctx.lineWidth = 3;
-  for (let y = Math.max(top, Math.floor(camY / 70) * 70); y < Math.min(HAZARD_Y, camY + viewH); y += 70) { line(80, y, 110, y + 30); line(40, y + 30, 60, y + 55); }
-  ctx.fillStyle = '#3f7a3a'; for (let y = Math.max(top, Math.floor(camY / 190) * 190); y < Math.min(HAZARD_Y, camY + viewH); y += 190) ell(128, y + 40, 16, 30);
-  // tak waaraan de eerste liaan hangt
-  ctx.fillStyle = '#5b3a1e'; ctx.fillRect(130, 28, START_X - 110, 20);
-  ctx.fillStyle = '#c89a62'; ell(START_X + 20, 38, 5, 10);
-  ctx.fillStyle = '#3f9a45'; ell(200, 22, 18, 8, -0.3); ell(240, 26, 12, 6, 0.4);
-  // gat in de boom met appels
-  ctx.fillStyle = '#2b1a0c'; ell(90, 300, 20, 28);
-  const a = appleSprite(false); ctx.drawImage(a.c, 78, 296, 16, 18); ctx.drawImage(a.c, 88, 294, 16, 18);
+// De startrots waar Andy op begint
+function drawRock() {
+  if (camX > ROCK.x1 + 60) return;
+  const { x0, x1, top } = ROCK, bot = HAZARD_Y + 80;
+  ctx.fillStyle = cachedGrad('rock', () => { const g = ctx.createLinearGradient(x0, 0, x1, 0); g.addColorStop(0, '#5d5a57'); g.addColorStop(0.6, '#8a8580'); g.addColorStop(1, '#6b6763'); return g; });
+  ctx.beginPath();
+  ctx.moveTo(x0 - 60, bot); ctx.lineTo(x0 - 20, top + 120); ctx.lineTo(x0, top + 20); ctx.quadraticCurveTo(x0 + 20, top - 6, x0 + 70, top - 4);
+  ctx.lineTo(x1 - 40, top - 6); ctx.quadraticCurveTo(x1 - 4, top - 4, x1, top + 24); ctx.lineTo(x1 + 12, top + 140); ctx.lineTo(x1 + 30, bot); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,.18)';
+  ctx.beginPath(); ctx.moveTo(x1 - 20, top + 30); ctx.lineTo(x1 + 12, top + 140); ctx.lineTo(x1 + 30, bot); ctx.lineTo(x1 - 40, bot); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(40,35,30,.5)'; ctx.lineWidth = 2.5;
+  line(x0 + 60, top + 40, x0 + 90, top + 110); line(x0 + 90, top + 110, x0 + 80, top + 170); line(x1 - 70, top + 60, x1 - 50, top + 150);
+  ctx.fillStyle = 'rgba(255,255,255,.12)'; ell(x0 + 110, top + 30, 50, 10, -0.1);
+  // gras en mos bovenop
+  ctx.fillStyle = '#4e9a3a'; ctx.beginPath(); ctx.moveTo(x0 + 2, top + 16); ctx.quadraticCurveTo(x0 + 20, top - 12, x0 + 70, top - 10); ctx.lineTo(x1 - 40, top - 12); ctx.quadraticCurveTo(x1 - 4, top - 10, x1 + 2, top + 18); ctx.lineTo(x1 - 6, top + 8); ctx.lineTo(x0 + 8, top + 8); ctx.fill();
+  ctx.strokeStyle = '#6fc04a'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+  for (let x = x0 + 8; x < x1; x += 11) line(x, top - 6, x + Math.sin(time * 2 + x) * 2 - 2, top - 16 - (x * 7 % 9));
+  // een varen en een appel op de rots
+  ctx.fillStyle = '#3f8f3a';
+  for (let k = -3; k <= 3; k++) { const a = -Math.PI / 2 + k * 0.3 + Math.sin(time * 1.5) * 0.03; ell(x0 + 40 + Math.cos(a) * 26, top - 8 + Math.sin(a) * 26, 26, 6, a); }
+  const ap = appleSprite(false); ctx.drawImage(ap.c, x1 - 70, top - 30, 22, 24);
 }
 function drawMarkers() {
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -2039,7 +2246,7 @@ function drawVine(v) {
   if (v.type === 'turbo') { ctx.strokeStyle = `rgba(255,215,70,${0.25 + 0.15 * Math.sin(time * 6)})`; ctx.lineWidth = 16; path(); ctx.stroke(); }
   ctx.strokeStyle = v.dark; ctx.lineWidth = v.type === 'balloon' ? 5 : 7.5; path(); ctx.stroke();
   ctx.strokeStyle = v.col; ctx.lineWidth = v.type === 'balloon' ? 3 : 4.5; path(); ctx.stroke();
-  ctx.strokeStyle = v.light; ctx.lineWidth = 1.4; ctx.save(); ctx.translate(-1.2, -0.5); path(); ctx.stroke(); ctx.restore();
+  if (qLevel >= 2) { ctx.strokeStyle = v.light; ctx.lineWidth = 1.4; ctx.save(); ctx.translate(-1.2, -0.5); path(); ctx.stroke(); ctx.restore(); }
   if (v.type === 'elastic') { ctx.setLineDash([5, 7]); ctx.strokeStyle = 'rgba(255,255,255,.75)'; ctx.lineWidth = 2.5; path(); ctx.stroke(); ctx.setLineDash([]); }
   if (v.type === 'icy') { ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = 1.5; path(); ctx.stroke(); }
   if (v.type === 'balloon') return;
@@ -2065,7 +2272,6 @@ function drawVine(v) {
 }
 // De tak waar een liaan aan hangt (blijft staan als een rotte liaan breekt)
 function drawBranch(v) {
-  if (v.x === START_X && v.ay === 40) return; // hangt aan de starttak
   if (v.balloon) { drawBalloon(v); return; }
   const style = BIOMES[v.bi].style, c = BIOMES[v.bi].c;
   ctx.save(); ctx.translate(v.x, v.ay); ctx.rotate(v.tilt);
@@ -2099,11 +2305,7 @@ function drawBranch(v) {
 function drawApple(a) {
   const bob = a.vine || a.loose ? 0 : Math.sin(a.t * 3) * 3;
   const x = a.x, y = a.y + bob, s = appleSprite(a.gold);
-  if (a.gold) {
-    const g = ctx.createRadialGradient(x, y, 2, x, y, 28);
-    g.addColorStop(0, 'rgba(255,230,120,.75)'); g.addColorStop(1, 'rgba(255,230,120,0)');
-    ctx.fillStyle = g; circ(x, y, 28);
-  }
+  if (a.gold) ctx.drawImage(glowSprite('255,230,120').c, x - 28, y - 28, 56, 56);
   const sc = 0.62 * (1 + Math.sin(a.t * 4) * 0.04);
   ctx.drawImage(s.c, x - s.w * sc / 2, y - s.h * sc / 2 - 2, s.w * sc, s.h * sc);
   if (a.gold && Math.sin(a.t * 5) > 0.6) { ctx.fillStyle = '#fff'; starPath(ctx, x + 8, y - 6, 4, a.t); ctx.fill(); }
@@ -2215,9 +2417,19 @@ function drawGorilla() {
   const dark = '#2d2833', face = '#d2a98f', belly = '#7d6674', band = '#e8322b';
   ctx.save(); ctx.translate(G.x, G.y);
   // zachte gloed zodat Andy goed opvalt tegen de achtergrond
-  const halo = ctx.createRadialGradient(0, 0, 10, 0, 0, 52);
-  halo.addColorStop(0, G.turboT > 0 ? 'rgba(255,220,90,.45)' : 'rgba(255,255,255,.22)'); halo.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillStyle = halo; circ(0, 0, 52);
+  ctx.globalAlpha = G.turboT > 0 ? 0.7 : 0.35;
+  ctx.drawImage(glowSprite(G.turboT > 0 ? '255,220,90' : '255,255,255').c, -52, -52, 104, 104);
+  ctx.globalAlpha = 1;
+  // blad-parachute (upgrade Bladzweef) als Andy valt zonder te duiken
+  if (lvl('glide') && G.state === 'air' && G.vy > 0 && G.dive < 0.1) {
+    const sw = Math.sin(time * 5) * 0.08;
+    ctx.save(); ctx.rotate(sw);
+    ctx.strokeStyle = '#5a3a1a'; ctx.lineWidth = 2; line(0, -30, 0, -62);
+    ctx.fillStyle = '#3f9a45'; ctx.beginPath(); ctx.ellipse(0, -66, 38, 12, 0, Math.PI, 0); ctx.fill();
+    ctx.fillStyle = '#6fc04a'; ctx.beginPath(); ctx.ellipse(0, -68, 34, 9, 0, Math.PI, 0); ctx.fill();
+    ctx.strokeStyle = '#2e7d32'; ctx.lineWidth = 1.2; line(-34, -66, 34, -66);
+    ctx.restore();
+  }
   if (G.balloonT > 0) {
     ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; line(0, -28, Math.sin(time * 3) * 4, -82);
     ctx.fillStyle = band; ell(Math.sin(time * 3) * 4, -106, 20, 25);
@@ -2275,6 +2487,20 @@ function drawGorilla() {
   else { ctx.strokeStyle = '#5a3e33'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(0, -8.5, 3.5, 0.25, Math.PI - 0.25); ctx.stroke(); }
   ctx.restore();
 }
+function drawParrot() {
+  const B = G.parrot;
+  if (!B) return;
+  const w = Math.sin(time * 18) * 7, d = B.target ? Math.sign(B.target.x - B.x) || 1 : 1;
+  ctx.save(); ctx.translate(B.x, B.y); ctx.scale(d, 1);
+  ctx.fillStyle = '#2f7fe0'; ctx.beginPath(); ctx.moveTo(-6, 2); ctx.lineTo(-22, 8); ctx.lineTo(-20, 2); ctx.fill();
+  ctx.fillStyle = '#e8322b'; ell(0, 0, 10, 6);
+  ctx.fillStyle = '#ffd23f'; ctx.beginPath(); ctx.moveTo(-2, -2); ctx.lineTo(4, -14 - w); ctx.lineTo(8, -1); ctx.fill();
+  ctx.fillStyle = '#2f7fe0'; ctx.beginPath(); ctx.moveTo(-4, -1); ctx.lineTo(0, -12 - w * 0.7); ctx.lineTo(4, -1); ctx.fill();
+  ctx.fillStyle = '#e8322b'; circ(9, -4, 5);
+  ctx.fillStyle = '#ffffff'; circ(10.5, -5, 2); ctx.fillStyle = '#111'; circ(11, -5, 1);
+  ctx.fillStyle = '#f5c518'; ctx.beginPath(); ctx.moveTo(13, -4); ctx.lineTo(18, -1); ctx.lineTo(13, 0); ctx.fill();
+  ctx.restore();
+}
 function drawParts() {
   for (const p of parts) {
     const a = clamp(p.life / p.max * 1.5, 0, 1);
@@ -2301,13 +2527,18 @@ function drawHazard(P) {
   if (camY + viewH < HAZARD_Y - 150) return;
   const lavaW = styleWeight(P, 'volcano');
   if (lavaW > 0) {
-    const g = ctx.createLinearGradient(0, HAZARD_Y - 160, 0, HAZARD_Y);
-    g.addColorStop(0, 'rgba(255,120,20,0)'); g.addColorStop(1, `rgba(255,120,20,${0.45 * lavaW})`);
-    ctx.fillStyle = g; ctx.fillRect(x0, HAZARD_Y - 160, x1 - x0, 160);
+    ctx.fillStyle = cachedGrad('lava' + Math.round(lavaW * 20), () => {
+      const g = ctx.createLinearGradient(0, HAZARD_Y - 160, 0, HAZARD_Y);
+      g.addColorStop(0, 'rgba(255,120,20,0)'); g.addColorStop(1, `rgba(255,120,20,${0.45 * lavaW})`);
+      return g;
+    });
+    ctx.fillRect(x0, HAZARD_Y - 160, x1 - x0, 160);
   }
-  const grd = ctx.createLinearGradient(0, HAZARD_Y, 0, HAZARD_Y + 130);
-  grd.addColorStop(0, P.hazTop); grd.addColorStop(0.35, rgbStr(mixC(P.hazTopC, P.hazBotC, 0.5))); grd.addColorStop(1, P.hazBot);
-  ctx.fillStyle = grd;
+  ctx.fillStyle = cachedGrad('haz' + paletteKey(P), () => {
+    const grd = ctx.createLinearGradient(0, HAZARD_Y, 0, HAZARD_Y + 130);
+    grd.addColorStop(0, P.hazTop); grd.addColorStop(0.35, rgbStr(mixC(P.hazTopC, P.hazBotC, 0.5))); grd.addColorStop(1, P.hazBot);
+    return grd;
+  });
   ctx.beginPath(); ctx.moveTo(x0, bottom);
   const sx = Math.floor(x0 / 14) * 14;
   for (let x = sx; x <= x1 + 14; x += 14) ctx.lineTo(x, waveY(x));
@@ -2370,7 +2601,8 @@ function drawTexts() {
 }
 function drawAmbient(P) {
   const type = P.t < 0.5 ? P.a.particle : P.b.particle;
-  for (const p of amb) {
+  for (let i = 0; i < Q.amb; i++) {
+    const p = amb[i];
     switch (type) {
       case 'leaf': ctx.fillStyle = p.s > 1.2 ? 'rgba(120,190,70,.85)' : 'rgba(90,170,70,.8)'; ell(p.x, p.y, 5 * p.s, 2.4 * p.s, time * 2 + p.ph); break;
       case 'firefly': {
@@ -2393,31 +2625,47 @@ function drawFlash() {
   if (flashT > 0) { ctx.fillStyle = `rgba(255,255,255,${flashT})`; ctx.fillRect(0, 0, viewW, viewH); }
 }
 
+
 function render() {
   const P = paletteAt((camX + viewW * 0.5 - START_X) / PX_PER_M);
-  const S = scale * dpr;
+  const S = scale * pr;
+  // 1) verre achtergrond in een aparte buffer op lage resolutie (mag toch wat vaag zijn);
+  //    op de lage kwaliteitsniveaus wordt die maar om het andere beeld ververst
+  if (++bgFrame % Q.bgEvery === 0 || bgStale) {
+    bgStale = false;
+    ctx = bgCtx;
+    const SB = S * Q.bg;
+    ctx.setTransform(SB, 0, 0, SB, 0, 0);
+    drawSky(P);
+    drawMountains(P);
+    drawAltClouds(P);
+    drawFlocks(P);
+    drawForestLine(P);
+    drawMidTrees(P);
+    ctx = mainCtx;
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(bgCanvas, 0, 0, canvas.width, canvas.height);
+  // 2) nabije achtergrond op volle resolutie
   ctx.setTransform(S, 0, 0, S, 0, 0);
-  drawSky(P);
-  drawMountains(P);
-  drawAltClouds(P);
-  drawFlocks(P);
-  drawForestLine(P);
-  drawMidTrees(P);
   drawFlyers();
   drawGiantTrunks(P);
   drawLightRays(P);
+  // 3) de speelwereld
   const sx = shakeT > 0 ? (Math.random() - 0.5) * shakeAmp * 2 : 0, sy = shakeT > 0 ? (Math.random() - 0.5) * shakeAmp * 2 : 0;
   ctx.setTransform(S, 0, 0, S, -(camX + sx) * S, -(camY + sy) * S);
-  drawStartTree();
+  drawRock();
   drawSkyBirds();
   drawMarkers();
   drawShrooms();
-  for (const v of vines) if (v.x > camX - 600 && v.x < camX + viewW + 600 && v.ay < camY + viewH + 50 && v.ay + v.pts.length * SEG_LEN * 1.5 > camY - 50) drawVine(v);
+  const vx0 = camX - 300, vx1 = camX + viewW + 420, vy0 = camY - 60, vy1 = camY + viewH + 60;
+  for (const v of vines) if (v.x > vx0 && v.rest[2] - 200 < vx1 && v.ay < vy1 && v.rest[3] + 150 > vy0) drawVine(v);
   for (const v of vines) if (v.x > camX - 80 && v.x < camX + viewW + 80 && v.ay > camY - 220 && v.ay < camY + viewH + 60) drawBranch(v);
   for (const a of apples) if (a.x > camX - 30 && a.x < camX + viewW + 30 && a.y > camY - 30 && a.y < camY + viewH + 30) drawApple(a);
   drawFoes();
   drawFish();
-  if (G) drawGorilla();
+  if (G) { drawGorilla(); drawParrot(); }
   drawParts();
   drawHazard(P);
   drawTexts();
@@ -2458,11 +2706,11 @@ function startReady() {
   game.mode = 'ready';
   input.down = false;
   showScreen(null);
-  showBanner('🌿 Jungle', 'Houd ingedrukt om vast te houden, laat los om te springen!');
+  showBanner('🌿 Jungle', 'Houd ingedrukt om te springen en een liaan te grijpen!');
 }
 function begin() {
   game.mode = 'playing';
-  if (lvl('rocket') > 0) startRocket();
+  if (lvl('rocket') > 0) startRocket(); else jump();
 }
 function gameOver(quit) {
   game.mode = 'over';
@@ -2666,7 +2914,7 @@ window.addEventListener('storage', e => { if (e.key === SAVE_KEY) { save = loadS
 function press() {
   Sfx.init();
   if (input.down) return;
-  input.down = true;
+  input.down = true; input.presses++;
   game.holdLock = false;
   if (game.mode === 'ready' && !curScreen && !game.paused) begin();
 }
@@ -2727,9 +2975,10 @@ function updateHud() {
   setText('hudItems', items.trim());
   $('hudItems').style.display = items ? '' : 'none';
   let hint = '';
-  if (game.mode === 'ready') hint = 'Houd SPATIE of het scherm ingedrukt om te beginnen';
+  if (game.mode === 'ready') hint = 'Houd SPATIE of het scherm ingedrukt om naar de liaan te springen';
   else if (game.mode === 'playing' && save.runs < 3 && run.dist < 120) {
-    if (G.state === 'hang') hint = G.vx > 150 ? 'Laat nu los om te springen!' : 'Blijf vasthouden… wacht op de zwaai naar voren';
+    if (G.state === 'stand') hint = 'Druk opnieuw om te springen';
+    else if (G.state === 'hang') hint = G.vx > 150 ? 'Laat nu los om te springen!' : 'Blijf vasthouden… wacht op de zwaai naar voren';
     else if (G.state === 'air') hint = 'Houd ingedrukt om te duiken en een liaan te grijpen';
   }
   setText('hint', hint);
@@ -2740,15 +2989,27 @@ function updateHud() {
 //  Hoofdlus
 // =====================================================================
 let last = performance.now(), acc = 0;
+// automatische kwaliteit: te traag -> resolutie en effecten omlaag (en onthouden voor de volgende keer)
+const perf = { ema: 16.7, t: 0, cool: 3 };
+function adaptQuality(dtMs) {
+  if (dtMs > 120 || document.hidden) return; // tabwissel e.d. niet meetellen
+  perf.ema += (dtMs - perf.ema) * 0.06;
+  perf.t += dtMs / 1000; perf.cool -= dtMs / 1000;
+  if (perf.cool > 0) return;
+  if (perf.ema > 20.5 && qLevel > 0) { qMax = qLevel - 1; setQuality(qLevel - 1); perf.t = 0; perf.cool = 2.5; perf.ema = 16.7; }
+  else if (perf.ema < 17.4 && perf.t > 6 && qLevel < qMax) { setQuality(qLevel + 1); perf.t = 0; perf.cool = 3; }
+}
 function frame(now) {
   let dt = (now - last) / 1000;
   last = now;
+  adaptQuality(dt * 1000);
   if (dt > 0.1) dt = 0.1;
   if (!game.paused) {
     acc += dt;
     let steps = 0;
-    while (acc >= STEP && steps < 16) { step(DT); acc -= STEP; steps++; }
-    if (steps >= 16) acc = 0;
+    // hooguit 4 physics-stappen per beeld: liever even iets trager dan een haperende spiraal
+    while (acc >= STEP && steps < 4) { step(DT); acc -= STEP; steps++; }
+    if (acc > STEP) acc = 0;
     const gdt = dt * GAME_SPEED;
     updateEffects(gdt);
     const oy = camY;
@@ -2766,7 +3027,7 @@ function frame(now) {
 
 // Debug-/testhaak (handig voor automatische tests)
 window.__andy = { get G() { return G; }, get run() { return run; }, get game() { return game; }, get save() { return save; },
-  get vines() { return vines; }, get apples() { return apples; }, get foes() { return foes; }, Sfx, Music, press, unpress, startReady };
+  get vines() { return vines; }, get apples() { return apples; }, get foes() { return foes; }, get quality() { return qLevel; }, AIR_G, MAX_FALL, DT, Sfx, Music, press, unpress, startReady };
 
 resetWorld();
 refreshMenu();
