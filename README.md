@@ -1,6 +1,6 @@
 # 🍎 Andy Apples
 
-Een 2D-slingerspel in puur HTML (geïnspireerd op *Benji Bananas*). Andy de gorilla zwaait door de jungle aan lianen die met physics werken, verzamelt appels en probeert zo ver mogelijk te komen.
+Een 2D-slingerspel in puur HTML. Andy de gorilla zwaait door de jungle aan lianen die met physics werken, verzamelt appels en probeert zo ver mogelijk te komen.
 
 ## Spelen
 
